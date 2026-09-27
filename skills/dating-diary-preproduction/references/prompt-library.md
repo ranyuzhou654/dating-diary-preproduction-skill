@@ -2,6 +2,8 @@
 
 本文件保存可长期复用的 Prompt 模块。
 
+所有 `{{...}}` 占位符都从 shot JSON 或角色 `profile.json` 填入。人物的具体身份特征（发型、眼镜、痣、服装）**只**来自 profile.json 的 `identity_anchors` / `must_not_have`，模板本身不写死。
+
 ---
 
 # 1. 素材改编 Agent
@@ -221,7 +223,7 @@ REFERENCE USAGE RULES:
 只用于严格保持女主身份、脸型、五官、发型、身材比例和整体气质。
 
 男主角色设定板：
-只用于严格保持男主身份、脸型、五官、发型、眼镜、身材比例和整体气质。
+只用于严格保持男主身份、脸型、五官、发型、身材比例和整体气质，以及人物块中 IDENTITY ANCHORS 列出的特征。
 
 场景 Anchor：
 只用于保持空间结构、灯光、桌面陈设、窗外环境和整体场景连续性。
@@ -321,6 +323,12 @@ FEMALE LEAD — LIN YUAN
 身形纤细。
 整体带轻微旧杂志、文艺、克制的都市气质。
 
+IDENTITY ANCHORS:
+{{female.identity_anchors}}
+
+MUST NOT HAVE:
+{{female.must_not_have}}
+
 她聪明、观察力强、安静。
 表面礼貌。
 情绪反应非常细微。
@@ -359,6 +367,12 @@ MALE DATE
 
 服装：
 {{outfit}}
+
+IDENTITY ANCHORS:
+{{male.identity_anchors}}
+
+MUST NOT HAVE:
+{{male.must_not_have}}
 
 核心气质：
 
@@ -489,12 +503,10 @@ CHARACTER CONSISTENCY:
 
 现实角色转换为Q版之后仍必须具有可辨识身份。
 
-保留：
+保留该角色人物块中 IDENTITY ANCHORS 列出的全部特征
+（通常包括发型、脸型核心特征、标志性服装元素；只有角色本身戴眼镜时才保留眼镜）。
 
-发型
-眼镜
-脸型核心特征
-标志性服装元素
+不得出现 MUST NOT HAVE 中列出的任何特征。
 
 COMEDY RULE:
 
@@ -590,7 +602,7 @@ scene block
 style block
 reference manifest
 
-把这些内容拼装成一条可以直接用于 ChatGPT Image 的 Prompt。
+把这些内容拼装成一条可以直接用于 image2 的 Prompt。
 
 规则：
 

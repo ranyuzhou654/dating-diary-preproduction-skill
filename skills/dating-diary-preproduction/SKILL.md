@@ -1,23 +1,29 @@
 ---
 name: dating-diary-preproduction
-description: 将真实 dating 素材、帖子、聊天记录、零散观察或已定剧本转成《Dating Diary》标准前期制作包：去识别化与原创改编、A切片/中短篇剧本、分镜、资产登记、Reference Routing、Reality/Fantasy Anchor、ChatGPT Image 静态关键帧 Prompt、静帧 QC、结构化打包。只负责前期素材准备与静态图阶段，不做视频生成、图生视频、配音、剪辑、字幕烧录或发布。用户说“把这个 dating 素材改成短剧”“做 Dating Diary 分镜”“给每镜配 reference / 图片 prompt”“整理成前期制作包”时使用。
+description: 将真实 dating 素材、帖子、聊天记录、零散观察或已定剧本转成《Dating Diary》标准前期制作包：去识别化与原创改编、A切片/中短篇剧本、台词时长校验、分镜、资产登记、Reference Routing、Reality/Fantasy Anchor、image2 静态关键帧生成（状态文件 + 自动 QC + 有上限的重跑）、结构化打包。只负责前期素材准备与静态图阶段，不做视频生成、图生视频、配音、剪辑、字幕烧录或发布（视频阶段见 dating-diary-production）。用户说“把这个 dating 素材改成短剧”“做 Dating Diary 分镜”“给每镜配 reference / 图片 prompt”“生成关键帧”“整理成前期制作包”时使用。
 ---
 
 # Dating Diary 前期制作总控
 
 你负责把一个真实 dating 素材或已经确定的短剧方向，整理成**可重复、可追踪、可交接的前期制作包**。
 
+## 运行环境
+
+- 默认在 **Codex** 中运行。图片生成使用 Codex 内置的 **image2**，不调用外部图片 API。
+- 本 skill 自带脚本，放在 `scripts/`，用 `python3` 运行。凡是脚本能做的判断（台词时长、关键帧状态、人脸相似度），一律以脚本结果为准，不靠模型自评。
+- 所有进度写入项目目录下的状态文件。Codex 会话可能中断或被压缩上下文：**每次开始工作先读 `00_meta/project.json` 和 `07_keyframes/keyframe_state.json`，从未完成的地方继续。** 用户说“继续 <project_id>”即表示从状态文件恢复。
+
 ## 边界
 
 本 skill 的终点是：
 
-- 已批准的剧本
+- 已批准的剧本（已通过台词时长校验）
 - 已拆分的 shots
 - 已登记的 assets
 - 已完成 Reference Routing
-- Reality / Fantasy Anchor 方案
-- 每镜 ChatGPT Image Prompt
-- 静态关键帧 QC 结果
+- 已批准的 Reality / Fantasy Anchor
+- 每镜 image2 Prompt
+- 每镜静态关键帧及 QC 结果
 - 前期交付目录与 manifest
 
 **不要进入以下阶段：**
@@ -30,7 +36,7 @@ description: 将真实 dating 素材、帖子、聊天记录、零散观察或�
 - 字幕烧录
 - 发布
 
-即使用户提到“后面给视频 Agent 用”，你也只需要把前期资料整理到可交接状态，不替下游执行视频任务。
+交付包完成后，视频阶段由 `dating-diary-production` skill 读取 `09_handoff/preproduction_manifest.json` 接手。你只需要把前期资料整理到可交接状态。
 
 开始前读取：
 
@@ -45,14 +51,16 @@ description: 将真实 dating 素材、帖子、聊天记录、零散观察或�
 
 1. **每个镜头必须先能作为一张静态关键帧成立。**
 2. **先锁 Anchor，再扩展镜头。**
-3. **创意交给模型，连续性尽量交给规则。**
+3. **创意交给模型，连续性尽量交给规则和脚本。**
 4. **真实经历只借观察，不复刻真实个人。**
 5. **男嘉宾在笑点发生前必须像正常人。**
 6. **女主反应克制，喜剧来自观察和脑内字面化。**
 7. **所有角色、场景、风格、特殊道具都用 asset_id 管理。**
-8. **人工只审批高价值判断。**
-9. **不得假装不存在的参考图已经获得批准。**
-10. **不得因为缺少素材而擅自编造用户已确认的设定。**
+8. **人物身份特征只来自角色 profile.json 的 `identity_anchors`，模板里不写死任何具体特征（例如眼镜）。**
+9. **人工只审批高价值判断。**
+10. **不得假装不存在的参考图已经获得批准。**
+11. **不得因为缺少素材而擅自编造用户已确认的设定。**
+12. **原始素材只存为 `01_source/original_source.*`（被 .gitignore 排除）；后续阶段只使用去识别化后的 `01_source/adaptation_notes.md`。**
 
 ---
 
@@ -60,17 +68,18 @@ description: 将真实 dating 素材、帖子、聊天记录、零散观察或�
 
 ## 阶段 0：建立项目状态
 
-先记录：
+创建项目目录（结构见 [qc-and-packaging.md](references/qc-and-packaging.md) 第 7 节），写入 `00_meta/project.json`：
 
 - project_id
 - working_title
 - format: A切片 / B中短篇
 - source_type
+- input_asset_ids：用户指定的女主 / 男主 / 场景 ID
 - known_assets
 - current_stage
 - approved_items
 
-如果用户已经有角色板、场景图、Q版风格图、现成剧本或已批准 Anchor，直接登记并复用，不要从头重做。
+用户输入通常是：一段已筛选的真实素材 + 改编要求 + 女主角色 ID + 男主角色 ID + 场景 ID。按 ID 从 `assets/` 读取 profile.json 与参考图并登记；已有角色板、场景图、Q版风格图、现成剧本或已批准 Anchor，直接复用，不要从头重做。
 
 ---
 
@@ -109,10 +118,10 @@ description: 将真实 dating 素材、帖子、聊天记录、零散观察或�
 - 新增 visual gag
 - 加入女主自己的自嘲或误判
 
-输出：
+输出（写入 `01_source/adaptation_notes.md`，只含去识别化后的内容）：
 
 A. 原素材真正有价值的观察  
-B. 需要去识别化的信息  
+B. 需要去识别化的信息（只列类别，不抄原文）  
 C. 3–5 个原创改编方向  
 D. 每个方向最强的 visual gag / Q版脑内小剧场
 
@@ -143,7 +152,22 @@ NORMAL REALITY
 → HARD CUT  
 → calm reality
 
-只输出最终可拍剧本，不输出分镜。
+只输出最终可拍剧本，不输出分镜。同时写入 `02_script/script.md` 与 `02_script/script.json`（每句对白含 speaker 与 text）。
+
+### 台词时长校验（提交 Gate 02 之前必须做）
+
+运行：
+
+```bash
+python3 scripts/check_dialogue_timing.py 02_script/script.json
+```
+
+规则：中文按约 4.5 字/秒，英文按约 2.5 词/秒，另加换人说话的停顿。脚本给出每句的最短可说时长和全片最短时长。如果剧本声称的总时长短于脚本估算：
+
+- 在提交给用户时**明确写出**“按台词实际需要约 X 秒”；
+- 同时给出一版精简台词供选择。
+
+不得把装不下台词的时长写进剧本。
 
 ### HUMAN GATE 02：最终剧本
 
@@ -173,6 +197,8 @@ NORMAL REALITY
 - usage
 - do_not_use_for
 - status: missing / draft / approved
+
+角色资产还必须有 `profile.json`，其中包含 `identity_anchors`（必须出现的特征）和 `must_not_have`（必须不出现的特征，例如“不戴眼镜”）。格式见 [schemas.md](references/schemas.md)。
 
 如果关键资产缺失，只输出**最小补充清单**，不要擅自补造不存在的参考图。
 
@@ -217,6 +243,14 @@ Q版层默认：
 - Fantasy 进入点
 - Reality 返回点
 
+每镜的 `duration_hint` 不得小于该镜台词的 `est_speech_seconds`。拆完后再运行一次：
+
+```bash
+python3 scripts/check_dialogue_timing.py 03_storyboard/shots.json
+```
+
+有 FAIL 就调整 duration_hint，不要改台词（台词已在 Gate 02 批准）。
+
 ---
 
 ## 阶段 5：Reference Routing
@@ -236,7 +270,7 @@ Q版层默认：
 
 ---
 
-## 阶段 6：Anchor 计划
+## 阶段 6：Anchor
 
 ### Reality Anchor
 
@@ -255,18 +289,13 @@ Q版层默认：
 - 核心 fantasy world 一眼成立
 - visual gag 清楚
 
+用 image2 生成两张 Anchor（本集没有 Fantasy 就只生成 Reality），保存为 `06_anchors/reality_anchor.png`、`06_anchors/fantasy_anchor.png`，并对 Anchor 跑一次阶段 8 的 QC。然后把 Anchor 连同 QC 结果交给用户。
+
 ### HUMAN GATE 03：Anchor
 
-如果环境支持图片生成，可以先生成 Reality Anchor 与 Fantasy Anchor。
+状态写为 `awaiting_approval`，停下。
 
-如果环境不支持图片生成，则输出：
-
-- anchor_prompt
-- reference_asset_ids
-- approval_checklist
-- status: awaiting_approval
-
-不得跳过批准状态并假设 Anchor 已通过。
+不得跳过批准状态并假设 Anchor 已通过。用户要求修改时，按修改意见重生成并再次提交。
 
 ---
 
@@ -277,17 +306,17 @@ Q版层默认：
 Reality 镜头：
 
 REALITY_MASTER_PROMPT  
-+ relevant character block  
++ relevant character block（含该角色 identity_anchors 与 must_not_have）  
 + scene continuity block  
 + shot-specific block
 
 Fantasy 镜头：
 
 Q_CHIBI_MASTER_PROMPT  
-+ relevant character block  
++ relevant character block（含 identity_anchors 与 must_not_have）  
 + shot-specific block
 
-必须输出：
+必须输出（写入 `05_prompts/image_prompts.json` 与 `05_prompts/shot_XX.txt`）：
 
 - shot_id
 - final_prompt
@@ -304,15 +333,50 @@ Q_CHIBI_MASTER_PROMPT
 
 ---
 
+## 阶段 7.5：批量生成关键帧（Anchor 批准后自动进行）
+
+先初始化状态文件：
+
+```bash
+python3 scripts/keyframe_state.py init <project_dir>
+```
+
+然后循环，**一次只处理一张**：
+
+1. `python3 scripts/keyframe_state.py next <project_dir>` 取下一个待处理镜头及其尝试次数；返回 `DONE` 时结束循环。
+2. 用 image2 生成：prompt 取 `05_prompts/shot_XX.txt`（若是重跑，末尾追加上次的 regeneration_instruction），参考图按该镜 reference_asset_ids 附上。
+3. 保存为 `07_keyframes/shot_XX_tryN.png`（N 为尝试序号，从 1 开始）。
+4. 执行阶段 8 的 QC。
+5. `python3 scripts/keyframe_state.py record <project_dir> --shot XX --file <path> --status PASS|FAIL --issues "..." --instruction "..."` 写回结果。
+
+脚本负责执行上限：同一镜头第 3 次仍 FAIL，会自动标记为 `exception` 并跳到下一镜。**不要**在脚本之外自行多跑。全部处理完后，`python3 scripts/keyframe_state.py status <project_dir>` 输出汇总，异常镜头列给用户（这不是新的 Gate，用户可以之后再处理）。
+
+PASS 的镜头由脚本把最终文件复制为 `07_keyframes/shot_XX.png`。
+
+---
+
 ## 阶段 8：静态关键帧 QC
 
-按 [qc-and-packaging.md](references/qc-and-packaging.md) 检查：
+两层检查，都要做：
 
-- character identity
+**1. 客观层（脚本）**：写实人物镜头运行
+
+```bash
+python3 scripts/face_check.py --image <keyframe> --ref <character_model_sheet> [--ref ...]
+```
+
+任一应出现的角色相似度低于阈值 → 直接判 FAIL，不讨论。Q版镜头跳过这一层（人脸模型不适用于 chibi）。
+
+**2. 清单层**：按 [qc-and-packaging.md](references/qc-and-packaging.md) 第 4 节逐项检查：
+
+- character identity（逐条核对 identity_anchors 与 must_not_have）
 - wardrobe
 - scene continuity
 - shot compliance
 - generation defects
+- 真实人物与商标（画面中不得出现像真实名人的脸、真实公司或品牌 logo）
+
+清单层尽量由**独立的检查步骤**完成：若环境支持子任务，交给一个只做 QC、不参与生成的子任务；否则至少在生成结束后单独开一轮，只看图和标准，不看生成时的思路。
 
 输出：
 
@@ -324,7 +388,7 @@ Q_CHIBI_MASTER_PROMPT
 - issues
 - regeneration_instruction
 
-FAIL 时只修最关键问题，不重新设计整个镜头。
+FAIL 时只修最关键问题（最多 3 个），不重新设计整个镜头。
 
 ---
 
@@ -333,16 +397,18 @@ FAIL 时只修最关键问题，不重新设计整个镜头。
 最终整理：
 
 - project metadata
-- source / adaptation notes
+- source / adaptation notes（仅去识别化内容）
 - approved script
-- shots
+- shots（含 dialogue、speaker、duration_hint、est_speech_seconds、sound_hint）
 - asset manifest
 - image prompts
-- anchor prompts / approved anchors
-- static keyframes（若已有）
-- qc report
-- preproduction manifest
+- approved anchors
+- static keyframes
+- qc report（含 exception 列表）
+- `09_handoff/preproduction_manifest.json`
+
+字段见 [schemas.md](references/schemas.md) 第 6 节。handoff 条件见 [qc-and-packaging.md](references/qc-and-packaging.md) 第 8 节。
 
 这里结束。
 
-**不要自动进入视频阶段。**
+**不要自动进入视频阶段。** 用户需要生成视频时，使用 `dating-diary-production` skill。
