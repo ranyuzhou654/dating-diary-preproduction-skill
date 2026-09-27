@@ -1,13 +1,19 @@
 {
-  "base_url": "https://YOUR-COMFYUI-ADDRESS",
+  "backend": "zealman",
+  "base_url": "https://YOUR-INSTANCE.seetacloud.com:8443",
   "auth": null,
-  "workflow_api": "workflows/minimax_h3_api.json",
+  "workflow_id": "U01-minimax_h3参考转视频",
+  "auto_start": true,
+  "plugin_series": ["U"],
+  "serial": true,
+  "ref_slots": "exact",
+  "max_refs": 9,
   "nodes": {
     "conditioning": "136",
     "prompt": "146",
     "duration": "147",
     "noise": "129",
-    "save": ""
+    "save": "92"
   },
   "inputs": {
     "prompt": "prompt",
@@ -15,8 +21,10 @@
     "seed": "noise_seed",
     "save_prefix": "filename_prefix"
   },
-  "ref_input_prefix": "ref_image_",
   "takes_per_segment": 3,
+  "max_resubmits": 2,
   "poll_seconds": 15,
-  "timeout_minutes": 240
+  "timeout_minutes": 240,
+
+  "workflow_api": "workflows/minimax_h3_api.json"
 }

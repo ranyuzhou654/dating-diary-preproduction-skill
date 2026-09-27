@@ -79,7 +79,9 @@ description: 将真实 dating 素材、帖子、聊天记录、零散观察或�
 - current_stage
 - approved_items
 
-用户输入通常是：一段已筛选的真实素材 + 改编要求 + 女主角色 ID + 男主角色 ID + 场景 ID。按 ID 从 `assets/` 读取 profile.json 与参考图并登记；已有角色板、场景图、Q版风格图、现成剧本或已批准 Anchor，直接复用，不要从头重做。
+用户输入通常是：一段已筛选的真实素材 + 改编要求 + 女主角色 ID + 男主角色 ID + 场景 ID。按 ID 从仓库根目录的 `assets/` 读取 profile.json 与参考图并登记，并把本集用到的资产复制到集目录的 `04_assets/`（保持 `characters/<ID>/` 这样的结构），让这一集不受之后角色库修改的影响。之后所有状态文件和 manifest 里的路径都相对于集目录。已有角色板、场景图、Q版风格图、现成剧本或已批准 Anchor，直接复用，不要从头重做。
+
+原始素材：用户粘贴的文字存为 `01_source/original_source.txt`；多个文件或截图放在 `01_source/raw/`。两者都被 .gitignore 排除。
 
 ---
 
@@ -349,7 +351,7 @@ python3 scripts/keyframe_state.py init <project_dir>
 4. 执行阶段 8 的 QC。
 5. `python3 scripts/keyframe_state.py record <project_dir> --shot XX --file <path> --status PASS|FAIL --issues "..." --instruction "..."` 写回结果。
 
-脚本负责执行上限：同一镜头第 3 次仍 FAIL，会自动标记为 `exception` 并跳到下一镜。**不要**在脚本之外自行多跑。全部处理完后，`python3 scripts/keyframe_state.py status <project_dir>` 输出汇总，异常镜头列给用户（这不是新的 Gate，用户可以之后再处理）。
+脚本负责执行上限：同一镜头第 3 次仍 FAIL，会自动标记为 `exception` 并跳到下一镜。**不要**在脚本之外自行多跑。全部处理完后，`python3 scripts/keyframe_state.py status <project_dir>` 输出汇总，异常镜头列给用户（这不是新的 Gate）。视频阶段要求每镜都有定稿关键帧，所以在进入视频阶段前，异常镜头必须由用户处理：从已有的 `shot_XX_tryN.png` 里挑一张，或按用户意见再生成一张请用户确认，或使用用户提供的图，然后运行 `python3 scripts/keyframe_state.py resolve <project_dir> --shot XX --file <path>` 定稿。不要替用户挑图。
 
 PASS 的镜头由脚本把最终文件复制为 `07_keyframes/shot_XX.png`。
 

@@ -25,7 +25,7 @@
 
 1. **Subject**：每个出场人物一个 Subject，场景一个 Subject。人物的主参考图是角色设定图（现实段）或 Q版角色图（Q版段），关键帧作为“seen in”补充。
 2. **外貌描述不临场发挥**：直接用 `character_blocks` 的 `appearance_block_en` 和 `wardrobe_en`。`must_not_have` 写成否定（"no glasses"、"clean-shaven, no stubble"）。
-3. **Picture 编号**：与 `segments.json` 中该段 `pictures[].n` 一致；每张图至少被引用一次。
+3. **Picture 编号**：与 `segments.json` 中该段 `pictures[].n` 一致；每张图至少被引用一次。只写本段真实用到的图片编号。默认模式下槽位数正好等于图片数；只有在 `"ref_slots": "card"` 模式下，多出的槽位才会被填成白色空图，提示词里**不要**提到这些编号。
 4. **[Shot k]**：按本段镜头顺序编号。第 1 镜不写时间戳，之后每镜写 `At 00:0x.xxx`，取自该镜的 `start`。相邻两镜是同一景别的连续表演时，可以合并成一个 [Shot]，但时间戳必须递增。
 5. **每个 [Shot] 写清**：景别与机位、构图参照哪张图（matching <Picture n>）、人物动作、表情、说话方式、镜头运动。
 6. **台词**：逐字照抄 `dialogue_lines`。中文 `<d>[Chinese] …</d>`，英文 `<d>[English] …</d>`，中英混说的一句按中文标。说话前写清是谁、怎么说（"says plainly"、"murmurs"）。

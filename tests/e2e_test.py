@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROD = os.path.join(ROOT, "skills/dating-diary-production/scripts")
@@ -35,6 +36,24 @@ def png(path, color):
 
 def free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
+
+
+def write_prompts(P, segs):
+    for s in segs:
+        body = []
+        for i, shot in enumerate(s["shots"]):
+            ts = "" if i == 0 else f"At 00:{int(shot['start']):02d}.{round(shot['start'] % 1 * 1000):03d}, "
+            d = " ".join(f"<d>[Chinese] {l['text']}</d>" for l in shot["dialogue_lines"])
+            body.append(f"[Shot {i + 1}] {ts}{d}")
+        refs = " ".join(f"<Picture {p['n']}>" for p in s["pictures"])
+        json.dump({"subject_definitions": [f"<Subject 1> in {refs}"], "summary": "[reference generation] test",
+                   "retention_analysis": [], "overall_soundscape": "", "non_diegetic_music": "N/A",
+                   "detailed_description": "Vertical 9:16 framing. No on-screen text or subtitles. " + " ".join(body)},
+                  open(f"{P}/{s['prompt_file']}", "w"), ensure_ascii=False)
+
+
+def stats(port):
+    return json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/mock/stats"))
 
 
 def main():
@@ -71,20 +90,11 @@ def main():
     assert segs[1]["duration"] == 3.0
 
     # 2. prompts (templated stand-in for what the agent writes) + validation
-    for s in segs:
-        body = []
-        for i, shot in enumerate(s["shots"]):
-            ts = "" if i == 0 else f"At 00:{int(shot['start']):02d}.{round(shot['start'] % 1 * 1000):03d}, "
-            d = " ".join(f"<d>[Chinese] {l['text']}</d>" for l in shot["dialogue_lines"])
-            body.append(f"[Shot {i + 1}] {ts}{d}")
-        refs = " ".join(f"<Picture {p['n']}>" for p in s["pictures"])
-        json.dump({"subject_definitions": [f"<Subject 1> in {refs}"], "summary": "[reference generation] test",
-                   "retention_analysis": [], "overall_soundscape": "", "non_diegetic_music": "N/A",
-                   "detailed_description": "Vertical 9:16 framing. No on-screen text or subtitles. " + " ".join(body)},
-                  open(f"{P}/{s['prompt_file']}", "w"), ensure_ascii=False)
+    write_prompts(P, segs)
     sh(f"{PROD}/validate_video_prompts.py", P)
 
-    # 3. render on the mock server (resume path: submit part, then run)
+    # 3. render on a bare ComfyUI (resume path: submit part, then run). The fixture is the real
+    #    U01 workflow: its reference inputs are ref_images.ref_image_N next to ref_image_size.
     port = free_port()
     srv = subprocess.Popen([sys.executable, f"{ROOT}/tests/mock_comfy.py", "--port", str(port), "--dir", f"{tmp}/server"])
     time.sleep(1)
@@ -93,7 +103,8 @@ def main():
         os.makedirs(f"{cfgd}/workflows")
         shutil.copy(f"{ROOT}/tests/fixture_workflow_api.json", f"{cfgd}/workflows/minimax_h3_api.json")
         cfg = json.load(open(f"{ROOT}/skills/dating-diary-production/comfy.config.example.json"))
-        cfg.update(base_url=f"http://127.0.0.1:{port}", nodes={}, poll_seconds=1, takes_per_segment=2)
+        cfg.update(backend="comfyui", base_url=f"http://127.0.0.1:{port}", workflow_api="workflows/minimax_h3_api.json",
+                   nodes={}, poll_seconds=1, takes_per_segment=2)
         json.dump(cfg, open(f"{cfgd}/comfy.json", "w"))
         sh(f"{PROD}/comfy_run.py", "check", P, "--config", f"{cfgd}/comfy.json")
         sh(f"{PROD}/comfy_run.py", "submit", P, "--config", f"{cfgd}/comfy.json", "--only", "G1")
@@ -101,6 +112,90 @@ def main():
         st = json.load(open(f"{P}/10_production/production_state.json"))
         assert len(st["jobs"]) == 6 and all(j["status"] == "done" and j["files"] for j in st["jobs"])
         assert len(set(st["uploads"].values())) == len(st["uploads"]), "remote upload names must be unique"
+        by_pid = {j["prompt_id"]: j for j in stats(port)["jobs"]}
+        seg_by = {s["id"]: s for s in segs}
+        for j in st["jobs"]:   # every reference re-wired, nothing left over from the template
+            assert len(by_pid[j["prompt_id"]]["refs"]) == len(seg_by[j["segment"]]["pictures"]), j
+    finally:
+        srv.terminate()
+
+    # 3b. the zealman panel on AutoDL: saved workflow card, ComfyUI not started yet
+    card = "U01-minimax_h3参考转视频"
+    os.makedirs(f"{tmp}/cards")
+    shutil.copy(f"{ROOT}/tests/fixture_workflow_api.json", f"{tmp}/cards/{card}.json")
+    port = free_port()
+    srv = subprocess.Popen([sys.executable, f"{ROOT}/tests/mock_comfy.py", "--port", str(port), "--dir", f"{tmp}/panel",
+                            "--workflows", f"{tmp}/cards", "--comfy-stopped"])
+    time.sleep(1)
+
+    def panel_project(name, **overrides):
+        d = os.path.join(tmp, name)
+        shutil.copytree(P, d, ignore=shutil.ignore_patterns("production_state.json", "11_renders", "12_rough_cut"))
+        c = json.load(open(f"{ROOT}/skills/dating-diary-production/comfy.config.example.json"))
+        c.update(base_url=f"http://127.0.0.1:{port}", workflow_id=card, poll_seconds=1, takes_per_segment=2, **overrides)
+        cp = f"{tmp}/cfg/{name}.json"
+        json.dump(c, open(cp, "w"), ensure_ascii=False)
+        return d, cp
+
+    try:
+        # exact slots (default): each job gets a card copy with exactly as many ref slots as it has images
+        Z, zc = panel_project("ep_panel")
+        out = sh(f"{PROD}/comfy_run.py", "check", Z, "--config", zc)
+        assert "largest segment needs 5 references — OK" in out, "5 refs fit without --max-refs"
+        assert stats(port)["starts"] == [{"pluginSeries": ["U"]}], "ComfyUI must be started with the U series"
+        sh(f"{PROD}/comfy_run.py", "run", Z, "--config", zc)
+        st = json.load(open(f"{Z}/10_production/production_state.json"))
+        ms = stats(port)
+        assert len(st["jobs"]) == 6 and all(j["status"] == "done" and j["files"] for j in st["jobs"]), st["jobs"]
+        assert all(f.endswith(".mp4") and os.path.exists(f"{Z}/{f}") for j in st["jobs"] for f in j["files"])
+        assert ms["max_in_flight"] == 1, "panel jobs must run one at a time"
+        assert ms["frees"] >= 6, "VRAM must be freed before every panel job"
+        segs_by = {s["id"]: s for s in segs}
+        by_pid = {j["prompt_id"]: j for j in ms["jobs"]}
+        for j in st["jobs"]:
+            mj, n = by_pid[j["prompt_id"]], len(segs_by[j["segment"]]["pictures"])
+            assert len(mj["refs"]) == n and not any("blank" in r or "placeholder" in r for r in mj["refs"]), mj
+            assert mj["card"] == f"{card}-dd{n}ref", mj
+        assert sorted(x["id"] for x in ms["saved"]) == sorted(f"{card}-dd{n}ref" for n in (5, 2, 3)), ms["saved"]
+        assert all(x["api_config"]["enabledParams"].get("146:prompt") for x in ms["saved"])
+        base = json.load(open(f"{tmp}/cards/{card}.json"))
+        assert base == json.load(open(f"{ROOT}/tests/fixture_workflow_api.json")), "the base card is never modified"
+
+        # a job the server forgot (ComfyUI restarted) is marked lost instead of waiting forever
+        st["jobs"].append({"segment": "G3", "seed": 1, "prompt_id": "gone", "status": "queued", "files": []})
+        json.dump(st, open(f"{Z}/10_production/production_state.json", "w"))
+        sh(f"{PROD}/comfy_run.py", "wait", Z, "--config", zc)
+        st = json.load(open(f"{Z}/10_production/production_state.json"))
+        assert st["jobs"][-1]["status"] == "error" and st["jobs"][-1]["error"].startswith("lost")
+
+        # a segment that keeps failing is not resubmitted forever
+        st["jobs"] += [{"segment": "G3", "seed": i, "prompt_id": f"x{i}", "status": "error", "files": []} for i in (2, 3)]
+        json.dump(st, open(f"{Z}/10_production/production_state.json", "w"))
+        out = sh(f"{PROD}/comfy_run.py", "run", Z, "--config", zc, "--only", "G3", "--force")
+        assert "not resubmitting" in out and len(stats(port)["jobs"]) == 6
+
+        # more images than max_refs (9 by default) is refused up front
+        _, lc = panel_project("ep_limit", max_refs=4)
+        out = sh(f"{PROD}/comfy_run.py", "check", Z, "--config", lc, ok=(1,))
+        assert "--max-refs 4" in out
+
+        # "card" mode: the card's own 4 slots, unused ones filled with a blank image
+        C, cc = panel_project("ep_card", ref_slots="card")
+        out = sh(f"{PROD}/comfy_run.py", "check", C, "--config", cc, ok=(1,))      # G1 needs 5 refs, card has 4
+        assert "--max-refs 4" in out
+        before = len(stats(port)["jobs"])
+        out = sh(f"{PROD}/comfy_run.py", "run", C, "--config", cc, ok=(2,))
+        assert "--max-refs 4" in out and len(stats(port)["jobs"]) == before, "nothing may be queued when a segment cannot fit"
+        sh(f"{PROD}/build_segments.py", C, "--max-refs", "4")
+        csegs = json.load(open(f"{C}/10_production/segments.json"))["segments"]
+        write_prompts(C, csegs)
+        sh(f"{PROD}/validate_video_prompts.py", C)
+        sh(f"{PROD}/comfy_run.py", "run", C, "--config", cc)
+        st = json.load(open(f"{C}/10_production/production_state.json"))
+        assert len(st["jobs"]) == 6 and all(j["status"] == "done" for j in st["jobs"])
+        mj = {j["prompt_id"]: j for j in stats(port)["jobs"]}
+        g2 = [mj[j["prompt_id"]] for j in st["jobs"] if j["segment"] == "G2"]
+        assert all(j["card"] == card and len(j["refs"]) == 4 and sum("dd_blank" in r for r in j["refs"]) == 2 for j in g2), g2
     finally:
         srv.terminate()
 
