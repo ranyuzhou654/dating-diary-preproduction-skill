@@ -1,0 +1,6 @@
+# Only needed for face_check.py (preproduction QC) and pick_takes.py (production take ranking).
+# Everything else uses the Python standard library plus ffmpeg/ffprobe.
+insightface
+onnxruntime
+opencv-python-headless
+numpy

@@ -119,10 +119,13 @@ character
 你会得到：
 
 1. 当前生成镜头
-2. 对应角色设定板
+2. 对应角色设定板与 profile.json（identity_anchors / must_not_have）
 3. 场景 Anchor
 4. 分镜要求
 5. 前后镜头
+6. face_check.py 的输出（写实镜头）
+
+你只负责检查，不参与生成，也不看生成时的推理过程。
 
 请检查以下项目。
 
@@ -130,9 +133,10 @@ CHARACTER IDENTITY
 
 脸型是否一致
 五官是否一致
-发型是否一致
-眼镜是否存在
+逐条核对角色 profile 的 identity_anchors：每一条是否都在
+逐条核对 must_not_have：是否出现了不该有的特征（例如不戴眼镜的角色戴了眼镜）
 身材比例是否明显改变
+face_check.py 的相似度结果（写实镜头）：低于阈值直接 FAIL
 
 WARDROBE
 
@@ -167,6 +171,12 @@ GENERATION DEFECT
 错误logo
 脸部AI塑料感
 
+REAL-WORLD LIKENESS
+
+画面中是否有人物长得像真实名人或公众人物（背景人群也要看）
+是否出现真实公司、品牌、学校的 logo 或徽标（剧情明确需要的文字道具除外，且不得带官方徽标）
+以上任一出现 → FAIL
+
 输出：
 
 PASS / FAIL
@@ -200,14 +210,27 @@ FAIL 时不要整段重写 Prompt。
 ```text
 REGENERATION PRIORITY:
 
-严格恢复参考图中的细框圆形金属眼镜。
+严格恢复参考图中的黑色层次短发和略乱的刘海。
 
-严格保持原本黑色蓬松短发。
+男主不戴眼镜（must_not_have: glasses）。
 
 除此之外不要改变画面构图、场景、灯光和人物动作。
 ```
 
 每次最多修 1–3 个最高优先级问题。
+
+重跑上限与记录：
+
+- 每个镜头最多 3 次尝试（含第一次），由 `scripts/keyframe_state.py` 强制执行。
+- 每次尝试的文件、QC 结论、问题和修复指令都写入 `07_keyframes/keyframe_state.json`。
+- 第 3 次仍 FAIL → 状态 `exception`，进入异常列表，继续处理下一镜，不阻塞流水线。
+- 异常镜头在交付包中列为 unresolved，由用户之后处理（换参考图、改镜头描述或手动选图）。
+
+face_check 阈值：
+
+- 默认 0.45（InsightFace buffalo_l 的余弦相似度）。实测参考：同一男主的关键帧对其设定图约 0.55，同一女主约 0.61；而**另一集的男主**对这张图也有 0.39——AI 生成的相似风格男性之间相似度偏高，所以阈值不能低于 0.4。
+- 第一集跑完后，用人工确认合格/不合格的关键帧各几张校准，写入 `00_meta/project.json` 的 `face_threshold`，之后运行时用 `--threshold` 传入。
+- 相似度只能拦住“明显换了个人”，拦不住发型、眼镜这类细节，这些靠清单层。
 
 ---
 
@@ -236,7 +259,7 @@ Dating_A_001/
 00_meta/
     project.json
 
-01_source/
+01_source/            # original_source.* 被 .gitignore 排除；只有去识别化后的 adaptation_notes.md 会被跟踪
     original_source.txt
     adaptation_notes.md
 
@@ -264,9 +287,10 @@ Dating_A_001/
     fantasy_anchor.png
 
 07_keyframes/
-    shot_01.png
+    keyframe_state.json
+    shot_01_try1.png
+    shot_01.png      # QC 通过后的定稿
     shot_02.png
-    shot_03.png
 
 08_qc/
     qc_report.json
@@ -297,9 +321,11 @@ Dating_A_001/
 - Fantasy Anchor approved（如果本集存在 Fantasy）
 - 每镜都有 image prompt
 - 每镜都有 reference_asset_ids
-- 已有静帧的镜头完成 QC
-- 所有 FAIL 镜头要么重跑通过，要么明确列为 unresolved
+- 剧本与 shots 已通过 check_dialogue_timing.py（每镜 duration_hint ≥ est_speech_seconds）
+- 每镜都有静帧，且完成 QC
+- 所有 FAIL 镜头要么重跑通过，要么以 exception 身份列入 manifest 的 `exceptions`
+- 原始素材未进入 09_handoff 与任何 git 跟踪的文件
 
 到此结束。
 
-**不要继续调用或设计视频生成流程。**
+**不要继续调用或设计视频生成流程。** 视频阶段由 `dating-diary-production` skill 读取 manifest 接手。

@@ -1,0 +1,22 @@
+{
+  "base_url": "https://YOUR-COMFYUI-ADDRESS",
+  "auth": null,
+  "workflow_api": "workflows/minimax_h3_api.json",
+  "nodes": {
+    "conditioning": "136",
+    "prompt": "146",
+    "duration": "147",
+    "noise": "129",
+    "save": ""
+  },
+  "inputs": {
+    "prompt": "prompt",
+    "duration": "value",
+    "seed": "noise_seed",
+    "save_prefix": "filename_prefix"
+  },
+  "ref_input_prefix": "ref_image_",
+  "takes_per_segment": 3,
+  "poll_seconds": 15,
+  "timeout_minutes": 240
+}

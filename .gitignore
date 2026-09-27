@@ -1,0 +1,18 @@
+# raw dating material never enters git (only de-identified adaptation notes do)
+**/01_source/original_source.*
+**/01_source/raw/
+
+# large generated media: keep in object storage
+**/07_keyframes/*_try*.png
+**/11_renders/
+**/12_rough_cut/
+
+# local ComfyUI connection (address / token)
+comfy.json
+**/comfy.json
+*.env
+.env
+
+__pycache__/
+*.pyc
+.DS_Store

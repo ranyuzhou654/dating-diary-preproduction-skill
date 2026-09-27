@@ -185,7 +185,7 @@ Fantasy：
 
 - 不需要服从 Reality 场景
 - 但 Q版人物身份必须可辨认
-- 发型、眼镜、关键服装元素应保留
+- 保留角色 profile.json 中 `identity_anchors` 列出的特征（发型、关键服装元素等；眼镜仅在角色本身戴时保留），且不出现 `must_not_have` 中的特征
 - 同一 fantasy world 内部需要保持风格一致
 
 ---
