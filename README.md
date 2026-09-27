@@ -75,23 +75,24 @@ flowchart TD
 
     subgraph PROD["dating-diary-production（视频）"]
         direction TB
-        PRECHK{"前置条件<br/>manifest 存在 · 关键帧文件齐全<br/>comfy_run.py check 通过"}
+        PRECHK{"前置条件<br/>manifest 存在 · 关键帧文件齐全<br/>comfy_run.py check 通过<br/>（面板在线 · 有卡 · ComfyUI 已启动 · 卡片存在 · 槽位够用）"}
         PRECHK -- "缺项" --> STOP(["停下，告诉用户缺什么"])
         PRECHK -- "通过（handoff_ready=false 时汇报写明）" --> P1[/"P1 build_segments.py<br/>分段 + 参考图路由<br/>→ 10_production/segments.json"/]
-        P1 -- "接口少于所需参考图" --> P1R[/"build_segments.py --max-refs N"/]
+        P1 -- "参考图多于槽位（U01 为 4）" --> P1R[/"build_segments.py --max-refs N"/]
         P1R --> P2
         P1 --> P2["P2 编写视频提示词<br/>10_production/prompts/G{n}.json"]
         P2 --> V[/"validate_video_prompts.py"/]
         V -- "ERROR" --> P2
-        V -- "通过（WARNING 逐条确认）" --> P3[/"P3 comfy_run.py run<br/>每段默认 3 个 take<br/>完成即下载 → 11_renders/G{n}/"/]
-        P3 -- "中途断开" --> P3W[/"comfy_run.py wait"/]
-        P3W --> P3
+        V -- "通过（WARNING 逐条确认）" --> P3[/"P3 comfy_run.py run<br/>每段默认 3 个 take，逐个进行：<br/>清显存 → 提交 → 等完成 → 下载到 11_renders/G{n}/"/]
+        P3 -- "中途断开：再跑 run" --> P3
+        P3 -- "lost：ComfyUI 重启过" --> P3L["记为 error<br/>下次 run 自动补交"]
+        P3L --> P3
         P3 -- "node_errors" --> INSPECT[/"comfy_run.py inspect<br/>重新核对节点"/]
         INSPECT --> P3
-        P3 -- "执行报错（同段最多补交 2 次）" --> P3E["记录到 production_state.json<br/>汇报用户"]
+        P3 -- "执行报错" --> P3E["记录到 production_state.json<br/>同段失败超过 2 次停止补交<br/>汇报用户"]
         P3 -- "全部下载完成" --> P4A[/"P4 pick_takes.py<br/>现实段按人物相似度选 take<br/>Q版段取第一条 → selection.json"/]
         P4A --> P4B[/"assemble.py<br/>→ 12_rough_cut/rough_cut.mp4"/]
-        P4B --> P5["P5 production_manifest.json<br/>+ 汇报：段数/时长 · 选中 take · 待处理问题 · 粗剪位置"]
+        P4B --> P5["P5 production_manifest.json<br/>+ 汇报：段数/时长 · 选中 take · 待处理问题 · 粗剪位置<br/>提醒到 AutoDL 关机停止计费"]
         P5 --> SWAP{"用户要换某段 take？"}
         SWAP -- "改 selection.json<br/>locked: true" --> P4B
         SWAP -- "否" --> DONE(["粗剪完成<br/>配乐 / 字幕 / 配音见 post-production.md"])
@@ -117,12 +118,12 @@ skills/
     └── scripts/
         ├── build_segments.py          # 分段 + 参考图路由
         ├── validate_video_prompts.py  # 提示词与分段逐项核对
-        ├── comfy_run.py               # 上传、提交、断点续跑、下载
+        ├── comfy_run.py               # zealman 面板 / 裸 ComfyUI：上传、逐个提交、断点续跑、下载
         ├── pick_takes.py              # 按人物一致性选 take
         └── assemble.py                # 粗剪 + production manifest
 tests/
-├── mock_comfy.py                 # 假 ComfyUI 服务器
-├── fixture_workflow_api.json     # 模拟的 API 格式工作流
+├── mock_comfy.py                 # 假 ComfyUI + 假 zealman 面板
+├── fixture_workflow_api.json     # U01 MiniMax H3 参考转视频工作流（API 格式）
 └── e2e_test.py                   # 整条视频链路的端到端测试
 ```
 
@@ -148,15 +149,19 @@ cp -R skills/dating-diary-preproduction skills/dating-diary-production ~/.claude
 
 ## 连接云端 ComfyUI
 
-见 `skills/dating-diary-production/references/comfy-setup.md`。简要步骤：
+默认对接 AutoDL 上的 **zealman 镜像**（控制面板 + ComfyUI），详见 `skills/dating-diary-production/references/comfy-setup.md`。简要步骤：
 
-1. 浏览器打开 `https://你的ComfyUI地址/system_stats`，确认能返回 JSON。
-2. ComfyUI 菜单 **Workflow → Export (API)**，保存为 `workflows/minimax_h3_api.json`。
-3. `cp skills/dating-diary-production/comfy.config.example.json comfy.json`，填 `base_url`（或设环境变量 `COMFY_URL`）。
-4. `python3 skills/dating-diary-production/scripts/comfy_run.py inspect --config comfy.json --write`，核对节点编号。
-5. `python3 skills/dating-diary-production/scripts/comfy_run.py check <集目录> --config comfy.json`。
+1. AutoDL 控制台**有卡模式**开机，打开面板地址（形如 `https://xxx.seetacloud.com:8443`）。
+2. 面板「API 生成」页导入 U01 MiniMax H3 参考转视频工作流并保存，记下卡片名。
+3. `cp skills/dating-diary-production/comfy.config.example.json comfy.json`，把 `workflow_id` 改成卡片名；面板地址放环境变量：`export COMFY_URL=https://…:8443`。
+4. `python3 skills/dating-diary-production/scripts/comfy_run.py check <集目录> --config comfy.json`：检查面板、GPU、ComfyUI（没启动会自动按 U 系列启动）、卡片和参考图槽位。
 
-ComfyUI 默认没有登录验证，不要把它裸露在公网上。
+几点注意：
+
+- U01 卡片每段最多 4 张参考图，超过时 `check` 会提示用 `build_segments.py --max-refs 4` 重新分段。
+- 面板上一次只跑一个任务，每个任务前清显存，完成后立刻下载到本地。
+- 面板没有登录验证，地址不要提交到 git 或公开；视频下载完记得到 AutoDL 关机停止计费。
+- 也可以直接连裸 ComfyUI（`"backend": "comfyui"`），见 comfy-setup.md 的 B 节。
 
 ## 使用示例
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Build a rough cut from the selected takes: trim, normalise, hard-cut concat.
 
-  python3 assemble.py <project_dir> [--width 1080 --height 1920 --fps 24]
+  python3 assemble.py <project_dir> [--width 1080 --height 1920 --fps 24] [--fit crop|pad]
 
 Reads 10_production/segments.json and 10_production/selection.json (from pick_takes.py).
-Each take is trimmed to [in, out] (default 0 → the segment's usable seconds), scaled/padded
-to the target size, re-encoded (H.264 + AAC 48 kHz stereo; silent audio added if a take has
-none), then joined with hard cuts. Output: 12_rough_cut/rough_cut.mp4.
+Each take is trimmed to [in, out] (default 0 → the segment's usable seconds), scaled to the
+target size, re-encoded (H.264 + AAC 48 kHz stereo; silent audio added if a take has none),
+then joined with hard cuts. --fit crop (default) fills the frame and trims the edges: the U01
+workflow renders 544×960 and upscales ×2 to 1088×1920, which is not exactly 9:16.
+--fit pad letterboxes instead. Output: 12_rough_cut/rough_cut.mp4.
 
 This is a timing check for the edit, not the final master: music, subtitles, the voice
 pass and fine trims happen in the editor (see references/post-production.md).
@@ -30,14 +32,18 @@ def main():
     ap.add_argument("--width", type=int, default=1080)
     ap.add_argument("--height", type=int, default=1920)
     ap.add_argument("--fps", type=int, default=24)
+    ap.add_argument("--fit", choices=("crop", "pad"), default="crop")
     a = ap.parse_args()
     P = a.project
     segs = json.load(open(os.path.join(P, "10_production/segments.json"), encoding="utf-8"))["segments"]
     sel = json.load(open(os.path.join(P, "10_production/selection.json"), encoding="utf-8"))
     work = os.path.join(P, "12_rough_cut/parts")
     os.makedirs(work, exist_ok=True)
-    vf = (f"scale={a.width}:{a.height}:force_original_aspect_ratio=decrease,"
-          f"pad={a.width}:{a.height}:(ow-iw)/2:(oh-ih)/2,fps={a.fps},format=yuv420p")
+    if a.fit == "crop":
+        fit = f"scale={a.width}:{a.height}:force_original_aspect_ratio=increase,crop={a.width}:{a.height}"
+    else:
+        fit = f"scale={a.width}:{a.height}:force_original_aspect_ratio=decrease,pad={a.width}:{a.height}:(ow-iw)/2:(oh-ih)/2"
+    vf = f"{fit},setsar=1,fps={a.fps},format=yuv420p"
     parts = []
     for seg in segs:
         g = seg["id"]
