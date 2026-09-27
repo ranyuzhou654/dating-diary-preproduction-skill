@@ -78,7 +78,7 @@ flowchart TD
         PRECHK{"前置条件<br/>manifest 存在 · 关键帧文件齐全<br/>comfy_run.py check 通过<br/>（面板在线 · 有卡 · ComfyUI 已启动 · 卡片存在 · 槽位够用）"}
         PRECHK -- "缺项（如 exception 镜头还没有定稿关键帧）" --> STOP(["停下，告诉用户缺什么"])
         PRECHK -- "通过（handoff_ready=false 时汇报写明）" --> P1[/"P1 build_segments.py<br/>分段 + 参考图路由<br/>→ 10_production/segments.json"/]
-        P1 -- "参考图多于槽位（U01 为 4）" --> P1R[/"build_segments.py --max-refs N"/]
+        P1 -- "某段参考图超过 9 张" --> P1R[/"build_segments.py --max-refs N"/]
         P1R --> P2
         P1 --> P2["P2 编写视频提示词<br/>10_production/prompts/G{n}.json"]
         P2 --> V[/"validate_video_prompts.py"/]
@@ -218,7 +218,7 @@ assets/
    python3 skills/dating-diary-production/scripts/comfy_run.py check --config comfy.json
    ```
 
-   这一步会依次检查：面板在线 → 有 GPU（不是无卡模式）→ ComfyUI 已启动（没启动会自动按 U 系列插件档启动）→ 卡片存在 → 节点映射 → 参考图槽位数（U01 是 4 个）。报错时看末尾的「常见问题」。
+   这一步会依次检查：面板在线 → 有 GPU（不是无卡模式）→ ComfyUI 已启动（没启动会自动按 U 系列插件档启动）→ 卡片存在 → 节点映射 → 参考图张数是否超过上限（默认 9 张）。报错时看末尾的「常见问题」。
 
 面板**没有登录验证**，拿到地址的人就能用你的 GPU，所以地址不要提交到 git，也不要公开。更多细节（接口、槽位、任务丢失、裸 ComfyUI）见 `skills/dating-diary-production/references/comfy-setup.md`。
 
@@ -583,7 +583,7 @@ episodes/ep05/
 
 Codex 切换到视频 skill，依次执行：
 
-1. `build_segments.py`：自动分段（现实段和 Q版段分开，每段 ≤ 10 秒），并给每段配参考图。U01 每段最多 4 张参考图，超出时 `check` 会提示用 `--max-refs 4` 重新分段；
+1. `build_segments.py`：自动分段（现实段和 Q版段分开，每段 ≤ 10 秒），并给每段配参考图（每段最多 9 张）。提交时每段用一张“需要几张就接几个槽位”的 U01 卡片副本（`<卡片名>-dd<N>ref`），不用空白图占位；
 2. 按 `references/video-prompt.md` 写每段的 MiniMax H3 JSON 提示词，再用 `validate_video_prompts.py` 校验；
 3. `comfy_run.py run`：每段默认 3 个 take，**一个接一个**进行：清显存 → 提交 → 等完成 → **立刻下载到 `11_renders/G{n}/`**；
 4. `pick_takes.py` 选出每段最好的 take，`assemble.py` 拼出 `12_rough_cut/rough_cut.mp4`。
@@ -677,7 +677,7 @@ Codex 的汇报会包含：分了几段、成片多长、每段选中的 take（
 | `python3 skills/dating-diary-preproduction/scripts/face_check.py --image <关键帧> --ref <设定图> [--threshold 0.45]` | 人脸相似度（写实镜头） |
 | `python3 skills/dating-diary-production/scripts/comfy_run.py check $EP --config comfy.json` | 检查面板、GPU、卡片、槽位 |
 | `python3 skills/dating-diary-production/scripts/comfy_run.py inspect --config comfy.json` | 列出卡片节点和参考图槽位 |
-| `python3 skills/dating-diary-production/scripts/build_segments.py $EP [--max-refs 4]` | 分段并配参考图 |
+| `python3 skills/dating-diary-production/scripts/build_segments.py $EP [--max-refs 9]` | 分段并配参考图 |
 | `python3 skills/dating-diary-production/scripts/validate_video_prompts.py $EP` | 校验视频提示词 |
 | `python3 skills/dating-diary-production/scripts/comfy_run.py run $EP --config comfy.json [--only G2] [--takes N]` | 生成并下载 |
 | `python3 skills/dating-diary-production/scripts/comfy_run.py wait $EP --config comfy.json` | 只等待、下载已提交的任务 |
@@ -701,7 +701,8 @@ Codex 的汇报会包含：分了几段、成片多长、每段选中的 take（
 | `check` 报 `no-GPU mode (无卡模式)` | AutoDL 以无卡模式开的机，回控制台按有卡模式重新开机 |
 | `check` 报卡片 `is not saved on the panel` | `workflow_id` 和面板上的卡片名不一致。报错里会列出已保存的卡片，照着改 `comfy.json` |
 | `cannot reach …` | 地址不对、实例没开机，或 Codex 沙箱没有联网权限 |
-| `FAIL: a segment needs 5 references but the workflow has 4 slots` | 运行 `build_segments.py <集目录> --max-refs 4`，再让 Codex 重写受影响段的提示词。也可以在工作流里多接几个“加载图像”，再重新保存卡片 |
+| `FAIL: a segment needs N references but a job can carry at most M` | 运行 `build_segments.py <集目录> --max-refs M`，再让 Codex 重写受影响段的提示词 |
+| 面板「API 生成」页多了 `…-dd3ref` 这样的卡片 | 脚本按参考图张数自动保存的 U01 副本，每次运行都会重新保存，不用管；你的 U01 卡片本身不会被修改 |
 | 提交时报 `unknown input` 或 `node_errors` | 卡片的节点编号变了：删掉 `comfy.json` 里的 `nodes`，运行 `inspect --write` 重新识别 |
 | 执行报错（显存不足等） | 已记录在 `production_state.json`，下次 `run` 会补交；同一段失败超过 2 次就停止，查明原因后用 `--retry-failed` |
 | 某个任务一直 `queued` 最后变成 `lost` | ComfyUI 中途重启过，旧任务查不到了。再跑一次 `run` 就会补交 |

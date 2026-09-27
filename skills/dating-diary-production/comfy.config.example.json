@@ -6,6 +6,8 @@
   "auto_start": true,
   "plugin_series": ["U"],
   "serial": true,
+  "ref_slots": "exact",
+  "max_refs": 9,
   "nodes": {
     "conditioning": "136",
     "prompt": "146",

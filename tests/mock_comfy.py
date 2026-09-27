@@ -8,11 +8,11 @@ Serves both backends on one port:
   zealman panel  /api/health, /api/gpu/info, /api/gpu/profile, /api/comfy/status, /api/comfy/start,
                  /api/comfy/plugin-availability, /api/comfy/queue-status, /api/comfy/proxy/free,
                  /api/comfy/upload/file, /api/workflow/list, /api/workflow/config/<id>,
-                 /api/workflow/generate, /api/workflow/result, /output/...
+                 /api/workflow/save, /api/workflow/generate, /api/workflow/result, /output/...
 
 Each job "renders" a video with ffmpeg: the first reference image held still for the requested
 Duration, with a tone as audio. Every submitted workflow is checked the way ComfyUI would be
-hard to debug for: reference inputs must be ref_images.ref_image_0..N-1 with no gaps, every
+hard to debug for: reference inputs must be ref_images.ref_image_0..N-1 with no gaps (N <= 9), every
 LoadImage must point at an uploaded file, and no other input may be lost. /mock/stats reports
 what happened (for assertions).
 
@@ -32,7 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 STATE = {"history": {}, "running": 0, "pending": 0, "max_in_flight": 0, "frees": 0, "jobs": [],
-         "comfy_running": True, "starts": []}
+         "comfy_running": True, "starts": [], "saved": []}
+MAX_REF_SLOTS = 9
 LOCK = threading.Lock()
 ROOT = "/tmp/mock_comfy"
 WORKFLOWS = None
@@ -54,6 +55,8 @@ def validate(wf):
     slots = sorted((int(m.group("i")), m.group("pre")) for k in ins if (m := REF_RE.match(k)))
     if not slots or [i for i, _ in slots] != list(range(len(slots))) or {p for _, p in slots} != {"ref_images.ref_image_"}:
         return f"bad reference inputs: {sorted(k for k in ins if 'ref_image' in k)}"
+    if len(slots) > MAX_REF_SLOTS:
+        return f"{len(slots)} reference inputs; the node takes at most {MAX_REF_SLOTS}"
     for n in wf.values():
         if n.get("class_type") == "LoadImage":
             img = n["inputs"]["image"]
@@ -68,12 +71,12 @@ def refs_of(wf):
     return [wf[cond["inputs"][k][0]]["inputs"]["image"] for _, k in keys]
 
 
-def enqueue(wf, source):
+def enqueue(wf, source, card=None):
     pid = uuid.uuid4().hex
     with LOCK:
         STATE["pending"] += 1
         STATE["max_in_flight"] = max(STATE["max_in_flight"], STATE["pending"] + STATE["running"])
-        STATE["jobs"].append({"prompt_id": pid, "source": source, "refs": refs_of(wf)})
+        STATE["jobs"].append({"prompt_id": pid, "source": source, "refs": refs_of(wf), "card": card})
     threading.Thread(target=render, args=(pid, wf), daemon=True).start()
     return pid
 
@@ -244,7 +247,14 @@ class H(BaseHTTPRequestHandler):
             err = validate(wf)
             if err:
                 return self.send({"success": False, "error": err}, 400)
-            return self.send({"success": True, "prompt_id": enqueue(wf, "generate"), "number": 1})
+            return self.send({"success": True, "prompt_id": enqueue(wf, "generate", wid), "number": 1})
+        if path == "/api/workflow/save":
+            req = json.loads(body)
+            wid = req["workflow_id"].removesuffix(".json")
+            with open(os.path.join(WORKFLOWS, wid + ".json"), "w") as f:
+                json.dump(req["workflow_template"], f, ensure_ascii=False)
+            STATE["saved"].append({"id": wid, "api_config": req.get("api_config")})
+            return self.send({"success": True})
         self.send({"error": "unknown"}, 404)
 
 

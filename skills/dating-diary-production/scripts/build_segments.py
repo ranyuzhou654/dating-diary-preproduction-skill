@@ -13,7 +13,10 @@ Rules (deterministic, no model judgement):
   * fantasy segment references: its keyframes → fantasy anchor → chibi sheets / Q style → props.
     Photoreal model sheets and the reality anchor are never attached to a fantasy segment.
 
-  python3 build_segments.py <project_dir> [--max-seconds 10] [--pad 0.5] [--min-seconds 3] [--max-refs N]
+  python3 build_segments.py <project_dir> [--max-seconds 10] [--pad 0.5] [--min-seconds 3] [--max-refs 9]
+
+--max-refs caps the references per segment (default 9, what the MiniMax H3 node takes: ref_image_0…8);
+the lowest-priority ones (props, then anchors, then sheets; keyframes last) are dropped first.
 """
 import argparse
 import json
@@ -208,7 +211,7 @@ def main():
     ap.add_argument("--max-seconds", type=float, default=10.0)
     ap.add_argument("--pad", type=float, default=0.5)
     ap.add_argument("--min-seconds", type=float, default=3.0)
-    ap.add_argument("--max-refs", type=int, default=0, help="0 = no limit")
+    ap.add_argument("--max-refs", type=int, default=9, help="0 = no limit")
     a = ap.parse_args()
     build(a.project, a.max_seconds, a.pad, a.min_seconds, a.max_refs)
     return 0

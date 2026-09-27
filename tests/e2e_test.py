@@ -119,9 +119,7 @@ def main():
     finally:
         srv.terminate()
 
-    # 3b. the zealman panel on AutoDL: saved workflow card, ComfyUI not started yet, 4 ref slots
-    Z = os.path.join(tmp, "ep_panel")
-    shutil.copytree(P, Z, ignore=shutil.ignore_patterns("production_state.json", "11_renders", "12_rough_cut"))
+    # 3b. the zealman panel on AutoDL: saved workflow card, ComfyUI not started yet
     card = "U01-minimax_h3参考转视频"
     os.makedirs(f"{tmp}/cards")
     shutil.copy(f"{ROOT}/tests/fixture_workflow_api.json", f"{tmp}/cards/{card}.json")
@@ -129,21 +127,22 @@ def main():
     srv = subprocess.Popen([sys.executable, f"{ROOT}/tests/mock_comfy.py", "--port", str(port), "--dir", f"{tmp}/panel",
                             "--workflows", f"{tmp}/cards", "--comfy-stopped"])
     time.sleep(1)
+
+    def panel_project(name, **overrides):
+        d = os.path.join(tmp, name)
+        shutil.copytree(P, d, ignore=shutil.ignore_patterns("production_state.json", "11_renders", "12_rough_cut"))
+        c = json.load(open(f"{ROOT}/skills/dating-diary-production/comfy.config.example.json"))
+        c.update(base_url=f"http://127.0.0.1:{port}", workflow_id=card, poll_seconds=1, takes_per_segment=2, **overrides)
+        cp = f"{tmp}/cfg/{name}.json"
+        json.dump(c, open(cp, "w"), ensure_ascii=False)
+        return d, cp
+
     try:
-        zc = f"{tmp}/cfg/panel.json"
-        cfg = json.load(open(f"{ROOT}/skills/dating-diary-production/comfy.config.example.json"))
-        cfg.update(base_url=f"http://127.0.0.1:{port}", workflow_id=card, poll_seconds=1, takes_per_segment=2)
-        json.dump(cfg, open(zc, "w"), ensure_ascii=False)
-        out = sh(f"{PROD}/comfy_run.py", "check", Z, "--config", zc, ok=(1,))      # G1 needs 5 refs, card has 4
-        assert "--max-refs 4" in out
+        # exact slots (default): each job gets a card copy with exactly as many ref slots as it has images
+        Z, zc = panel_project("ep_panel")
+        out = sh(f"{PROD}/comfy_run.py", "check", Z, "--config", zc)
+        assert "largest segment needs 5 references — OK" in out, "5 refs fit without --max-refs"
         assert stats(port)["starts"] == [{"pluginSeries": ["U"]}], "ComfyUI must be started with the U series"
-        out = sh(f"{PROD}/comfy_run.py", "run", Z, "--config", zc, ok=(2,))
-        assert "--max-refs 4" in out and not stats(port)["jobs"], "nothing may be queued when a segment cannot fit"
-        sh(f"{PROD}/build_segments.py", Z, "--max-refs", "4")
-        zsegs = json.load(open(f"{Z}/10_production/segments.json"))["segments"]
-        write_prompts(Z, zsegs)
-        sh(f"{PROD}/validate_video_prompts.py", Z)
-        sh(f"{PROD}/comfy_run.py", "check", Z, "--config", zc)
         sh(f"{PROD}/comfy_run.py", "run", Z, "--config", zc)
         st = json.load(open(f"{Z}/10_production/production_state.json"))
         ms = stats(port)
@@ -151,8 +150,16 @@ def main():
         assert all(f.endswith(".mp4") and os.path.exists(f"{Z}/{f}") for j in st["jobs"] for f in j["files"])
         assert ms["max_in_flight"] == 1, "panel jobs must run one at a time"
         assert ms["frees"] >= 6, "VRAM must be freed before every panel job"
-        g2 = [j for j in ms["jobs"] if j["prompt_id"] in {x["prompt_id"] for x in st["jobs"] if x["segment"] == "G2"}]
-        assert g2 and all(len(j["refs"]) == 4 and sum("dd_blank" in r for r in j["refs"]) == 2 for j in g2), g2
+        segs_by = {s["id"]: s for s in segs}
+        by_pid = {j["prompt_id"]: j for j in ms["jobs"]}
+        for j in st["jobs"]:
+            mj, n = by_pid[j["prompt_id"]], len(segs_by[j["segment"]]["pictures"])
+            assert len(mj["refs"]) == n and not any("blank" in r or "placeholder" in r for r in mj["refs"]), mj
+            assert mj["card"] == f"{card}-dd{n}ref", mj
+        assert sorted(x["id"] for x in ms["saved"]) == sorted(f"{card}-dd{n}ref" for n in (5, 2, 3)), ms["saved"]
+        assert all(x["api_config"]["enabledParams"].get("146:prompt") for x in ms["saved"])
+        base = json.load(open(f"{tmp}/cards/{card}.json"))
+        assert base == json.load(open(f"{ROOT}/tests/fixture_workflow_api.json")), "the base card is never modified"
 
         # a job the server forgot (ComfyUI restarted) is marked lost instead of waiting forever
         st["jobs"].append({"segment": "G3", "seed": 1, "prompt_id": "gone", "status": "queued", "files": []})
@@ -166,6 +173,29 @@ def main():
         json.dump(st, open(f"{Z}/10_production/production_state.json", "w"))
         out = sh(f"{PROD}/comfy_run.py", "run", Z, "--config", zc, "--only", "G3", "--force")
         assert "not resubmitting" in out and len(stats(port)["jobs"]) == 6
+
+        # more images than max_refs (9 by default) is refused up front
+        _, lc = panel_project("ep_limit", max_refs=4)
+        out = sh(f"{PROD}/comfy_run.py", "check", Z, "--config", lc, ok=(1,))
+        assert "--max-refs 4" in out
+
+        # "card" mode: the card's own 4 slots, unused ones filled with a blank image
+        C, cc = panel_project("ep_card", ref_slots="card")
+        out = sh(f"{PROD}/comfy_run.py", "check", C, "--config", cc, ok=(1,))      # G1 needs 5 refs, card has 4
+        assert "--max-refs 4" in out
+        before = len(stats(port)["jobs"])
+        out = sh(f"{PROD}/comfy_run.py", "run", C, "--config", cc, ok=(2,))
+        assert "--max-refs 4" in out and len(stats(port)["jobs"]) == before, "nothing may be queued when a segment cannot fit"
+        sh(f"{PROD}/build_segments.py", C, "--max-refs", "4")
+        csegs = json.load(open(f"{C}/10_production/segments.json"))["segments"]
+        write_prompts(C, csegs)
+        sh(f"{PROD}/validate_video_prompts.py", C)
+        sh(f"{PROD}/comfy_run.py", "run", C, "--config", cc)
+        st = json.load(open(f"{C}/10_production/production_state.json"))
+        assert len(st["jobs"]) == 6 and all(j["status"] == "done" for j in st["jobs"])
+        mj = {j["prompt_id"]: j for j in stats(port)["jobs"]}
+        g2 = [mj[j["prompt_id"]] for j in st["jobs"] if j["segment"] == "G2"]
+        assert all(j["card"] == card and len(j["refs"]) == 4 and sum("dd_blank" in r for r in j["refs"]) == 2 for j in g2), g2
     finally:
         srv.terminate()
 

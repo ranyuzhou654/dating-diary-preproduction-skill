@@ -7,7 +7,11 @@ Two backends (config key "backend"):
              the browser). Jobs go through the panel's workflow API: the workflow is a saved
              card on the panel's「API 生成」page, addressed by "workflow_id"; each job only
              sends "node:field" input values. References are uploaded with
-             /api/comfy/upload/file and written into the card's LoadImage nodes.
+             /api/comfy/upload/file and written into LoadImage nodes.
+             "ref_slots": "exact" (default) saves a copy of the card per reference
+             count — <card>-dd3ref has exactly 3 LoadImage slots — so a job never
+             carries unused slots. "card" uses the card's own slots and fills the
+             unused ones with a blank image.
   comfyui  — a bare ComfyUI (/prompt, /history, /view) with a locally exported API workflow.
 
 No third-party dependencies (standard library only).
@@ -303,40 +307,84 @@ def card_slots(cfg, wf, m):
     return slots
 
 
-def patch_workflow(cfg, wf, m, prompt_text, duration, seed, ref_names, prefix):
-    """comfyui backend: full API workflow with the references re-wired to new LoadImage nodes."""
-    wf = copy.deepcopy(wf)
-    inp = cfg.get("inputs") or {}
-    wf[m["prompt"]]["inputs"][inp.get("prompt", "prompt")] = prompt_text
-    wf[m["duration"]]["inputs"][inp.get("duration", "value")] = duration
-    wf[m["noise"]]["inputs"][inp.get("seed", "noise_seed")] = seed
-    wf[m["save"]]["inputs"][inp.get("save_prefix", "filename_prefix")] = prefix
+def rewire_refs(cfg, wf, m, ref_names):
+    """Copy of wf whose reference inputs are exactly len(ref_names) new LoadImage nodes.
 
+    Returns (workflow, [LoadImage node id per slot]). The template's own LoadImage nodes
+    are dropped unless something else still uses them.
+    """
+    wf = copy.deepcopy(wf)
     cond = wf[m["conditioning"]]["inputs"]
     slots = slots_of(cfg, wf, m)
     pre = REF_RE.match(slots[0][1]).group("pre")
     for _, k, _ in slots:
         del cond[k]
-    for src in {s for _, _, s in slots if s}:   # drop LoadImage nodes nothing uses any more
+    for src in {s for _, _, s in slots if s}:
         still_used = any(isinstance(v, list) and v and v[0] == src
                          for n in wf.values() for v in n.get("inputs", {}).values())
         if not still_used and wf.get(src, {}).get("class_type") == "LoadImage":
             del wf[src]
+    nodes = []
     for i, name in enumerate(ref_names):
         nid = str(90000 + i)
         wf[nid] = {"class_type": "LoadImage", "inputs": {"image": name, "upload": "image"},
                    "_meta": {"title": f"dd ref {i + 1}"}}
         cond[f"{pre}{i}"] = [nid, 0]
+        nodes.append(nid)
+    return wf, nodes
+
+
+def patch_workflow(cfg, wf, m, prompt_text, duration, seed, ref_names, prefix):
+    """comfyui backend: full API workflow with the references re-wired to new LoadImage nodes."""
+    wf, _ = rewire_refs(cfg, wf, m, ref_names)
+    inp = cfg.get("inputs") or {}
+    wf[m["prompt"]]["inputs"][inp.get("prompt", "prompt")] = prompt_text
+    wf[m["duration"]]["inputs"][inp.get("duration", "value")] = duration
+    wf[m["noise"]]["inputs"][inp.get("seed", "noise_seed")] = seed
+    wf[m["save"]]["inputs"][inp.get("save_prefix", "filename_prefix")] = prefix
     return wf
+
+
+def exact_slots(cfg):
+    return zealman(cfg) and cfg.get("ref_slots", "exact") == "exact"
+
+
+def ref_limit(cfg, wf, m):
+    """Most reference images one job may carry."""
+    if zealman(cfg) and not exact_slots(cfg):
+        return len(card_slots(cfg, wf, m))
+    return int(cfg.get("max_refs", 9))
+
+
+def param_keys(cfg, m):
+    inp = cfg.get("inputs") or {}
+    return [f"{m['prompt']}:{inp.get('prompt', 'prompt')}", f"{m['duration']}:{inp.get('duration', 'value')}",
+            f"{m['noise']}:{inp.get('seed', 'noise_seed')}", f"{m['save']}:{inp.get('save_prefix', 'filename_prefix')}"]
+
+
+def variant_card(cfg, wf, m, n):
+    """zealman "exact" mode: the card re-wired with exactly n reference slots, saved on the panel.
+
+    Saved once per run (so edits to the base card — steps, resolution, upscaling — carry
+    over on the next run) under "<card>-dd<n>ref". Returns (workflow_id, slots).
+    """
+    saved = cfg.setdefault("_variants", {})
+    if n not in saved:
+        name = f"{resolve_workflow_id(cfg)}-dd{n}ref.json"
+        tpl, nodes = rewire_refs(cfg, wf, m, ["dd_ref_placeholder.png"] * n)
+        keys = param_keys(cfg, m) + [f"{nid}:image" for nid in nodes]
+        http(cfg, "POST", "/api/workflow/save", {
+            "workflow_id": name, "workflow_template": tpl,
+            "api_config": {"enabledParams": {k: True for k in keys}, "formValues": {},
+                           "customLabels": {f"{nid}:image": f"ref {i + 1}" for i, nid in enumerate(nodes)}}})
+        saved[n] = (name, [(i, None, nid) for i, nid in enumerate(nodes)])
+        print(f"  saved card {name} ({n} reference slots)")
+    return saved[n]
 
 
 def input_values(cfg, m, slots, prompt_text, duration, seed, ref_names, blank, prefix):
     """zealman backend: the "node:field" overrides sent with /api/workflow/generate."""
-    inp = cfg.get("inputs") or {}
-    iv = {f"{m['prompt']}:{inp.get('prompt', 'prompt')}": prompt_text,
-          f"{m['duration']}:{inp.get('duration', 'value')}": duration,
-          f"{m['noise']}:{inp.get('seed', 'noise_seed')}": seed,
-          f"{m['save']}:{inp.get('save_prefix', 'filename_prefix')}": prefix}
+    iv = dict(zip(param_keys(cfg, m), (prompt_text, duration, seed, prefix)))
     for i, (_, _, src) in enumerate(slots):
         iv[f"{src}:image"] = ref_names[i] if i < len(ref_names) else blank
     return iv
@@ -352,7 +400,7 @@ def load_state(proj):
     return load(p) if os.path.exists(p) else {"jobs": [], "uploads": {}}
 
 
-def plan(a, cfg, segs, st, slot_count=None):
+def plan(a, cfg, segs, st, limit):
     """List of segment ids to submit, one entry per take to add."""
     takes = a.takes or cfg.get("takes_per_segment", 3)
     max_fail = cfg.get("max_resubmits", 2)
@@ -365,7 +413,9 @@ def plan(a, cfg, segs, st, slot_count=None):
         if not os.path.exists(os.path.join(a.project, seg["prompt_file"])):
             print(f"{g}: prompt file missing, skipped (write it and run validate_video_prompts.py first)")
             continue
-        if slot_count is not None and len(seg["pictures"]) > slot_count:
+        if not seg["pictures"]:
+            raise RuntimeError(f"{g} has no reference images; every segment needs at least its keyframe")
+        if len(seg["pictures"]) > limit:
             too_many.append(f"{g} ({len(seg['pictures'])})")
             continue
         jobs = [j for j in st["jobs"] if j["segment"] == g]
@@ -379,9 +429,11 @@ def plan(a, cfg, segs, st, slot_count=None):
             print(f"{g}: already has {have} take(s), skipped (use --force or --takes)")
         todo += [g] * n
     if too_many:
-        raise RuntimeError(f"the workflow has {slot_count} reference slots but {', '.join(too_many)} need more. "
-                           f"Rebuild with `build_segments.py <project> --max-refs {slot_count}` and rewrite those "
-                           f"prompts, or add LoadImage slots to the workflow and re-save it")
+        more = ("add LoadImage slots to the card, or use \"ref_slots\": \"exact\""
+                if zealman(cfg) and not exact_slots(cfg) else "or raise \"max_refs\" if the node accepts more")
+        raise RuntimeError(f"a job can carry at most {limit} reference images but {', '.join(too_many)} need more. "
+                           f"Rebuild with `build_segments.py <project> --max-refs {limit}` and rewrite those "
+                           f"prompts; {more}")
     return todo
 
 
@@ -393,13 +445,13 @@ class Submitter:
         self.st = load_state(a.project)
         self.wf = template(cfg)
         self.m = mapping(cfg, self.wf)
-        self.slots = card_slots(cfg, self.wf, self.m) if zealman(cfg) else None
+        self.slots = card_slots(cfg, self.wf, self.m) if zealman(cfg) and not exact_slots(cfg) else None
         ep = self.segs.get("episode") or self.segs.get("project_id") or "episode"
         self.sub = f"dating_diary/{ep}"
         self.by_id = {s["id"]: s for s in self.segs["segments"]}
 
     def plan(self):
-        return plan(self.a, self.cfg, self.segs, self.st, len(self.slots) if self.slots else None)
+        return plan(self.a, self.cfg, self.segs, self.st, ref_limit(self.cfg, self.wf, self.m))
 
     def ref_names(self, seg):
         names = []
@@ -429,9 +481,14 @@ class Submitter:
         if cfg.get("serial") or cfg.get("free_before_each", False):
             free_memory(cfg)
         if zealman(cfg):
-            iv = input_values(cfg, self.m, self.slots, prompt_text, seg["duration"], seed, names, self.blank(), prefix)
+            if exact_slots(cfg):
+                wid, slots = variant_card(cfg, self.wf, self.m, len(names))
+                blank = None
+            else:
+                wid, slots, blank = resolve_workflow_id(cfg), self.slots, self.blank()
+            iv = input_values(cfg, self.m, slots, prompt_text, seg["duration"], seed, names, blank, prefix)
             res = http(cfg, "POST", "/api/workflow/generate",
-                       {"workflow_id": resolve_workflow_id(cfg), "input_values": iv, "client_id": "dating-diary"})
+                       {"workflow_id": wid, "input_values": iv, "client_id": "dating-diary"})
         else:
             job_wf = patch_workflow(cfg, self.wf, self.m, prompt_text, seg["duration"], seed, names, prefix)
             res = http(cfg, "POST", "/prompt",
@@ -560,9 +617,15 @@ def cmd_check(a):
     print("node mapping:", m)
     if zealman(cfg):
         print(f"workflow card: {resolve_workflow_id(cfg)}")
-        slots = card_slots(cfg, wf, m)
-        n_slots = len(slots)
-        print(f"{n_slots} reference slots: " + ", ".join(f"{k} ← LoadImage #{s}" for _, k, s in slots))
+        n_slots = ref_limit(cfg, wf, m)
+        if exact_slots(cfg):
+            slots_of(cfg, wf, m)
+            print(f"reference slots: exact — each job uses a copy of the card with exactly as many slots as it "
+                  f"has images (saved as {resolve_workflow_id(cfg)}-dd<N>ref), up to {n_slots}")
+        else:
+            slots = card_slots(cfg, wf, m)
+            print(f"{n_slots} reference slots on the card (unused ones get a blank image): "
+                  + ", ".join(f"{k} ← LoadImage #{s}" for _, k, s in slots))
         try:
             av = http(cfg, "GET", "/api/comfy/plugin-availability")
             letter = resolve_workflow_id(cfg)[:1].upper()
@@ -588,15 +651,15 @@ def cmd_check(a):
         info = http(cfg, "GET", "/object_info/" + urllib.parse.quote(ct)).get(ct, {})
         decl = {**(info.get("input", {}).get("required") or {}), **(info.get("input", {}).get("optional") or {})}
         fixed = [k for k in decl if REF_RE.match(k)]
-        n_slots = len(fixed) or None
+        n_slots = min(len(fixed), ref_limit(cfg, wf, m)) if fixed else ref_limit(cfg, wf, m)
         print(f"{ct}: " + (f"declares {len(fixed)} reference inputs" if fixed else
-                           "reference inputs grow dynamically (no fixed count)"))
+                           "reference inputs grow dynamically") + f"; max_refs {ref_limit(cfg, wf, m)}")
     seg_p = paths(a.project)[0] if a.project else None
     if seg_p and os.path.exists(seg_p):
         need = max(len(s["pictures"]) for s in load(seg_p)["segments"])
         if n_slots and need > n_slots:
-            print(f"FAIL: a segment needs {need} references but the workflow has {n_slots} slots. Rebuild with "
-                  f"`build_segments.py <project> --max-refs {n_slots}` (or add slots to the workflow).")
+            print(f"FAIL: a segment needs {need} references but a job can carry at most {n_slots}. Rebuild with "
+                  f"`build_segments.py <project> --max-refs {n_slots}`.")
             return 1
         print(f"largest segment needs {need} references — OK")
     return 0

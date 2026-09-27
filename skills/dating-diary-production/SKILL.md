@@ -43,7 +43,7 @@ python3 scripts/build_segments.py <project_dir>
   - Q版段：本段关键帧 → Fantasy Anchor → Q版角色图 / Q版风格图 → 道具
   - **Q版段绝不接写实设定图和 Reality Anchor**，否则画风会被拉向写实。
 
-如果 `check` 报告参考图槽位少于某段需要的数量，用 `--max-refs N` 重跑分段（脚本按优先级从末尾丢弃）。**zealman 面板上的 U01 只有 4 个槽位**，所以这种情况下通常就是 `--max-refs 4`；重跑分段后已写好的提示词要按新的 `pictures` 重写。
+每段最多 9 张参考图（节点的 `ref_image_0…8`）。`build_segments.py` 默认按 9 张截断；提交时脚本按每段的张数自动使用只接这么多槽位的卡片副本，不用空白图占位（见 comfy-setup.md 第 3 节）。如果 `check` 报告某段超出上限，用它给出的 `--max-refs N` 重跑分段（脚本按优先级从末尾丢弃），然后按新的 `pictures` 重写提示词。
 
 脚本输出里的 warnings（缺文件、缺关键帧、单镜超长）要在汇报里原样列出。
 

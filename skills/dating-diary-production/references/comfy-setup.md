@@ -20,6 +20,7 @@
 | `GET /api/comfy/plugin-availability` | 当前插件档位能不能跑 U 系列 |
 | `GET /api/gpu/profile` | 显卡架构。U01 的文本编码器是 NVFP4 权重，只有 Blackwell（RTX 50 系）有原生算子 |
 | `GET /api/workflow/list`、`GET /api/workflow/config/{id}` | 找到工作流卡片、读出它的节点（节点编号和参考图槽位都从这里来） |
+| `POST /api/workflow/save` | 保存按参考图张数改接的卡片副本（`<卡片名>-dd<N>ref`），见第 3 节 |
 | `POST /api/comfy/upload/file` | 上传参考图，返回的 `name` 填进 LoadImage |
 | `POST /api/comfy/proxy/free` | 每个任务开跑前清显存 |
 | `POST /api/workflow/generate` | 提交：`workflow_id` + `input_values`（键是 `节点ID:字段名`） |
@@ -42,7 +43,7 @@ python3 skills/dating-diary-production/scripts/comfy_run.py inspect --config com
 python3 skills/dating-diary-production/scripts/comfy_run.py check <集目录> --config comfy.json
 ```
 
-`check` 会依次确认：面板存活 → 有 GPU → ComfyUI 已启动（没启动就按 `plugin_series` 启动，`"auto_start": false` 时要加 `--start`）→ 卡片存在 → 节点映射 → 参考图槽位数 → 本集最多需要几张参考图。
+`check` 会依次确认：面板存活 → 有 GPU → ComfyUI 已启动（没启动就按 `plugin_series` 启动，`"auto_start": false` 时要加 `--start`）→ 卡片存在 → 节点映射 → 参考图槽位模式 → 本集最多需要几张参考图。
 
 U01 的节点（示例配置里已经填好）：
 
@@ -57,13 +58,19 @@ U01 的节点（示例配置里已经填好）：
 
 卡片换了版本、节点编号变了：删掉配置里的 `nodes` 再跑 `inspect --write`，或者手动改。
 
-### 3. 参考图槽位只有 4 个
+### 3. 参考图槽位：需要几张就接几个
 
-面板 API 只能改参数，不能给工作流加节点，所以**每段最多 4 张参考图**（U01 有 4 个 LoadImage）：
+MiniMax H3 参考转视频节点最多接 9 张参考图（`ref_images.ref_image_0…8`）。每一段需要的张数不同：一个现实段可能是 2 张关键帧 + 2 张设定图 + Reality Anchor = 5 张，一个 Q版段可能只有 2 张。
 
-- `check` 发现某段超过 4 张会 FAIL，`run` 会拒绝提交。处理方法：`build_segments.py <集目录> --max-refs 4` 重新分段（按优先级从末尾丢：道具 → 锚点 → 设定图，关键帧最优先保留），然后重写受影响段的提示词。
-- 某段不足 4 张时，脚本把多出的槽位填成一张白色小图（面板自己也这么做），**提示词里不要提这些空槽位**。卡片里原来的示例图（`Untitled(4).jpg` 等）永远不会被用上。
-- 想要更多槽位：在 ComfyUI 里给参考转视频节点多接几个“加载图像”（`ref_image_4`、`ref_image_5`…），重新保存卡片。脚本会自动识别新的槽位数。
+面板的 `generate` 只能改参数，不能增删节点，所以脚本用 `/api/workflow/save` 另存卡片副本：
+
+- **`"ref_slots": "exact"`（默认）**：以你的 U01 卡片为模板，按张数生成只接 N 个“加载图像”的副本，保存为 `<卡片名>-dd<N>ref`（例如 `U01-…-dd3ref`），再用这张副本提交。**每个任务的槽位数正好等于图片数，没有空白图。**
+  - 只保存本次真正用到的张数，每次运行开始时重新保存一次。所以你改了 U01 卡片（步数、分辨率、超分），副本会在下一次运行时自动跟上。
+  - 你的 U01 卡片本身永远不会被修改。面板的「API 生成」页会多出这几张 `-dd<N>ref` 卡片，属于正常现象，不需要手动维护。
+  - 上限是 `"max_refs"`（默认 9）。某段超过时 `check` 会 FAIL、`run` 会拒绝提交；`build_segments.py` 默认也按 9 张截断（按优先级丢：道具 → 锚点 → 设定图，关键帧最后才丢）。
+- **`"ref_slots": "card"`**：直接用 U01 卡片自带的 4 个槽位，用不满的槽位填一张白色小图（面板自己也这么做）。只在面板不允许保存卡片时才用。空白图对模型来说是一张真实的参考图，即使提示词里不提它，也可能把画面往空白、低细节的方向拉。
+
+两种模式下，卡片里原来的示例图（`Untitled(4).jpg` 等）都不会被用上；提示词里都只写本段真实用到的 `<Picture n>`。
 
 ### 4. 为什么一次只跑一个任务
 
@@ -97,7 +104,7 @@ U01 的节点（示例配置里已经填好）：
 1. 浏览器打开 `http://地址/system_stats` 能返回 JSON。远程访问需要 ComfyUI 启动参数 `--listen`；优先用 SSH 隧道（`base_url` 填 `http://127.0.0.1:8188`）。
 2. ComfyUI 菜单 **Workflow → Export (API)**，保存为 `workflows/minimax_h3_api.json`（相对于配置文件）。API 格式是 `{"136": {"class_type": ..., "inputs": {...}}}`，不是带 `nodes`/`links` 的普通格式。
 3. 配置里设 `"backend": "comfyui"`，其余节点映射同上；`workflow_id`、`plugin_series`、`auto_start` 不用。
-4. 这个后端会把参考图节点整组删掉、按每段需要重新接，所以没有 4 张的上限；`"serial"` 默认为 false（一次排入全部任务），显存吃紧时改成 true。
+4. 这个后端每次提交都会把参考图节点整组删掉、按每段需要的张数重新接（同样受 `max_refs` 限制）；`"serial"` 默认为 false（一次排入全部任务），显存吃紧时改成 true。
 
 需要口令时（放在带认证的反向代理后面）：
 
